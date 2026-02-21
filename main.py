@@ -9,9 +9,9 @@ from threading import Thread
 # ===============================
 # ENV VARIABLES
 # ===============================
-BOT_TOKEN = os.getenv("8539685984:AAHaN767o8sxWRgLdCnE3bemtIciPkLxAhA")
-CHAT_ID = os.getenv("-1003796565669")
-EIA_API_KEY = os.getenv("ygYRxwb2VEOgKXiv6VYejVcQ6BHGvIkv0EO95gb5")
+BOT_TOKEN = os.environ.get("8539685984:AAHaN767o8sxWRgLdCnE3bemtIciPkLxAhA")
+CHAT_ID = os.environ.get("-1003796565669")
+EIA_API_KEY = os.environ.get("ygYRxwb2VEOgKXiv6VYejVcQ6BHGvIkv0EO95gb5")
 
 print("BOT_TOKEN loaded:", BOT_TOKEN is not None)
 print("CHAT_ID loaded:", CHAT_ID is not None)
