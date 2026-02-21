@@ -112,8 +112,6 @@ HIGH_IMPACT = ["cpi", "gdp", "repo", "fomc", "inflation", "monetary policy", "ra
 sent_news = set()
 bias = {k: 0 for k in ASSET_KEYWORDS.keys()}
 last_bias_time = datetime.now()
-last_premarket_sent = None
-last_projection_sent = None
 last_gamma_alert_time = None
 
 # ===============================
@@ -140,37 +138,8 @@ def probability_score(score, weight=1):
     adjusted = base + (score * 8 * weight)
     return max(5, min(95, adjusted))
 
-def bias_strength_label(score):
-    abs_score = abs(score)
-    if abs_score >= 4:
-        return "Extreme"
-    elif abs_score == 3:
-        return "Strong"
-    elif abs_score == 2:
-        return "Moderate"
-    elif abs_score == 1:
-        return "Mild"
-    else:
-        return "Neutral"
-
 # ===============================
-# INDEX VOLATILITY MODE
-# ===============================
-def index_volatility_mode(index_name):
-    score = bias.get(index_name, 0)
-    macro = bias.get("MACRO", 0)
-    crude = bias.get("CRUDE", 0)
-    combined = abs(score) + abs(macro) + abs(crude)
-
-    if combined >= 5:
-        return "⚡ EXPANSION MODE"
-    elif combined >= 3:
-        return "🔶 Elevated Volatility"
-    else:
-        return "🟢 Normal Volatility"
-
-# ===============================
-# VOLATILITY SPIKE MODEL (NEW)
+# VOLATILITY MODELS
 # ===============================
 def volatility_spike_model():
     total = (
@@ -189,9 +158,6 @@ def volatility_spike_model():
     else:
         return "🟢 Normal Volatility", total
 
-# ===============================
-# GAMMA BLAST DETECTOR (NEW)
-# ===============================
 def gamma_blast_detector():
     now = datetime.now()
     vol_label, vol_score = volatility_spike_model()
@@ -282,10 +248,14 @@ def bot_loop():
             time.sleep(60)
 
 # ===============================
-# START
+# START BOT THREAD (WORKS WITH GUNICORN)
+# ===============================
+load_state()
+Thread(target=bot_loop, daemon=True).start()
+
+# ===============================
+# LOCAL DEV ONLY
 # ===============================
 if __name__ == "__main__":
-    load_state()
-    Thread(target=bot_loop, daemon=True).start()
     port = int(os.getenv("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
