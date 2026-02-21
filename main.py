@@ -3,12 +3,21 @@ import requests
 import time
 import os
 import json
+import logging
 from datetime import datetime
 from flask import Flask
 from threading import Thread
 
 # ===============================
-# PERSISTENT STORAGE (CRITICAL)
+# LOGGING SETUP
+# ===============================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
+
+# ===============================
+# PERSISTENT STORAGE
 # ===============================
 STATE_FILE = "state.json"
 
@@ -19,8 +28,9 @@ def load_state():
             data = json.load(f)
             sent_news = set(data.get("sent_news", []))
             bias.update(data.get("bias", {}))
-    except:
-        pass
+            logging.info("State loaded successfully.")
+    except Exception as e:
+        logging.warning(f"State load failed: {e}")
 
 def save_state():
     try:
@@ -29,8 +39,8 @@ def save_state():
                 "sent_news": list(sent_news),
                 "bias": bias
             }, f)
-    except:
-        pass
+    except Exception as e:
+        logging.error(f"State save failed: {e}")
 
 # ===============================
 # ENV
@@ -51,27 +61,39 @@ app = Flask(__name__)
 def home():
     return "Institutional Multi-Asset Intelligence Engine Running"
 
+@app.route("/health")
+def health():
+    return {
+        "status": "running",
+        "time": str(datetime.now())
+    }
+
 # ===============================
 # TELEGRAM
 # ===============================
 def send_telegram(message, buttons=None):
     if not BOT_TOKEN or not CHAT_ID:
+        logging.error("Telegram ENV variables missing.")
         return
 
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-
-    payload = {
-        "chat_id": CHAT_ID,
-        "text": message,
-        "parse_mode": "HTML"
-    }
-
-    if buttons:
-        payload["reply_markup"] = {
-            "inline_keyboard": buttons
+    try:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": CHAT_ID,
+            "text": message,
+            "parse_mode": "HTML"
         }
 
-    requests.post(url, json=payload)
+        if buttons:
+            payload["reply_markup"] = {
+                "inline_keyboard": buttons
+            }
+
+        response = requests.post(url, json=payload, timeout=10)
+        logging.info(f"Telegram status: {response.status_code}")
+
+    except Exception as e:
+        logging.error(f"Telegram send failed: {e}")
 
 # ===============================
 # SOURCES
@@ -103,7 +125,6 @@ ASSET_KEYWORDS = {
 
 BULLISH_WORDS = ["rate cut", "stimulus", "inflation falls", "growth rises", "dovish", "surplus"]
 BEARISH_WORDS = ["rate hike", "inflation rises", "slowdown", "recession", "hawkish", "deficit"]
-
 HIGH_IMPACT = ["cpi", "gdp", "repo", "fomc", "inflation", "monetary policy", "rate decision"]
 
 # ===============================
@@ -115,7 +136,7 @@ last_bias_time = datetime.now()
 last_gamma_alert_time = None
 
 # ===============================
-# SENTIMENT
+# LOGIC
 # ===============================
 def classify_sentiment(title):
     t = title.lower()
@@ -138,9 +159,6 @@ def probability_score(score, weight=1):
     adjusted = base + (score * 8 * weight)
     return max(5, min(95, adjusted))
 
-# ===============================
-# VOLATILITY MODELS
-# ===============================
 def volatility_spike_model():
     total = (
         abs(bias.get("NIFTY", 0)) +
@@ -160,15 +178,13 @@ def volatility_spike_model():
 
 def gamma_blast_detector():
     now = datetime.now()
-    vol_label, vol_score = volatility_spike_model()
+    _, vol_score = volatility_spike_model()
     nifty_score = abs(bias.get("NIFTY", 0))
 
     morning_window = (now.hour == 9 and 15 <= now.minute <= 59)
     afternoon_window = (now.hour == 13) or (now.hour == 14 and now.minute <= 30)
 
-    if nifty_score >= 3 and vol_score >= 7 and (morning_window or afternoon_window):
-        return True
-    return False
+    return nifty_score >= 3 and vol_score >= 7 and (morning_window or afternoon_window)
 
 # ===============================
 # RSS
@@ -202,8 +218,8 @@ def check_rss():
                 sent_news.add(entry.link)
                 save_state()
 
-        except:
-            pass
+        except Exception as e:
+            logging.error(f"RSS Error: {e}")
 
 # ===============================
 # MARKET SUMMARY
@@ -222,39 +238,47 @@ def send_bias_summary():
         last_bias_time = datetime.now()
 
 # ===============================
-# LOOP
+# MAIN LOOP
 # ===============================
 def bot_loop():
     global last_gamma_alert_time
-    send_telegram("🚀 Institutional Scanner Started")
+    send_telegram("🚀 Institutional Scanner Started (Hardened)")
 
     while True:
-        try:
-            check_rss()
-            send_bias_summary()
+        check_rss()
+        send_bias_summary()
 
-            if gamma_blast_detector():
-                if not last_gamma_alert_time or (datetime.now() - last_gamma_alert_time).seconds > 900:
-                    send_telegram(
-                        "💥 <b>GAMMA BLAST SETUP DETECTED</b>\n"
-                        "High directional pressure + volatility spike.\n"
-                        "Prepare for momentum expansion."
-                    )
-                    last_gamma_alert_time = datetime.now()
+        if gamma_blast_detector():
+            if not last_gamma_alert_time or (datetime.now() - last_gamma_alert_time).seconds > 900:
+                send_telegram(
+                    "💥 <b>GAMMA BLAST SETUP DETECTED</b>\n"
+                    "High directional pressure + volatility spike.\n"
+                    "Prepare for momentum expansion."
+                )
+                last_gamma_alert_time = datetime.now()
 
-            time.sleep(CHECK_INTERVAL)
-
-        except:
-            time.sleep(60)
+        time.sleep(CHECK_INTERVAL)
 
 # ===============================
-# START BOT THREAD (WORKS WITH GUNICORN)
+# AUTO RESTART WRAPPER
+# ===============================
+def start_bot():
+    while True:
+        try:
+            bot_loop()
+        except Exception as e:
+            logging.critical(f"BOT CRASHED: {e}")
+            send_telegram(f"⚠️ BOT CRASHED: {e}")
+            time.sleep(10)
+
+# ===============================
+# START THREAD (GUNICORN SAFE)
 # ===============================
 load_state()
-Thread(target=bot_loop, daemon=True).start()
+Thread(target=start_bot, daemon=True).start()
 
 # ===============================
-# LOCAL DEV ONLY
+# LOCAL DEV
 # ===============================
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8080))
