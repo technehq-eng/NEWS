@@ -2,9 +2,35 @@ import feedparser
 import requests
 import time
 import os
+import json
 from datetime import datetime
 from flask import Flask
 from threading import Thread
+
+# ===============================
+# PERSISTENT STORAGE (CRITICAL)
+# ===============================
+STATE_FILE = "state.json"
+
+def load_state():
+    global sent_news, bias
+    try:
+        with open(STATE_FILE, "r") as f:
+            data = json.load(f)
+            sent_news = set(data.get("sent_news", []))
+            bias.update(data.get("bias", {}))
+    except:
+        pass
+
+def save_state():
+    try:
+        with open(STATE_FILE, "w") as f:
+            json.dump({
+                "sent_news": list(sent_news),
+                "bias": bias
+            }, f)
+    except:
+        pass
 
 # ===============================
 # ENV
@@ -81,18 +107,6 @@ BEARISH_WORDS = ["rate hike", "inflation rises", "slowdown", "recession", "hawki
 HIGH_IMPACT = ["cpi", "gdp", "repo", "fomc", "inflation", "monetary policy", "rate decision"]
 
 # ===============================
-# IMPACT MAPPING ENGINE
-# ===============================
-IMPACT_MAP = {
-    "NIFTY": ("Equity Liquidity", ["BANKING", "SENSEX"]),
-    "BANKING": ("Interest Rate Sensitive", ["NIFTY"]),
-    "CRUDE": ("Input Cost Risk", ["NIFTY"]),
-    "NATURAL GAS": ("Commodity Volatility", ["MCX GAS"]),
-    "MACRO": ("Macro Liquidity", ["NIFTY", "BANKING"]),
-    "FII FLOW": ("Capital Flow", ["NIFTY"])
-}
-
-# ===============================
 # STATE
 # ===============================
 sent_news = set()
@@ -100,6 +114,7 @@ bias = {k: 0 for k in ASSET_KEYWORDS.keys()}
 last_bias_time = datetime.now()
 last_premarket_sent = None
 last_projection_sent = None
+last_gamma_alert_time = None
 
 # ===============================
 # SENTIMENT
@@ -113,9 +128,6 @@ def classify_sentiment(title):
         score -= 1
     return score
 
-# ===============================
-# DETECT ASSET
-# ===============================
 def detect_asset(title):
     t = title.lower()
     for asset, words in ASSET_KEYWORDS.items():
@@ -123,17 +135,11 @@ def detect_asset(title):
             return asset
     return None
 
-# ===============================
-# PROBABILITY ENGINE
-# ===============================
 def probability_score(score, weight=1):
     base = 50
     adjusted = base + (score * 8 * weight)
     return max(5, min(95, adjusted))
 
-# ===============================
-# BIAS STRENGTH LABEL
-# ===============================
 def bias_strength_label(score):
     abs_score = abs(score)
     if abs_score >= 4:
@@ -164,94 +170,39 @@ def index_volatility_mode(index_name):
         return "🟢 Normal Volatility"
 
 # ===============================
-# INDEX PROJECTION (UPDATED)
+# VOLATILITY SPIKE MODEL (NEW)
 # ===============================
-def index_projection(index_name):
-    score = bias.get(index_name, 0) + bias.get("MACRO", 0)
-    strength = bias_strength_label(score)
-    prob = probability_score(score, weight=2)
+def volatility_spike_model():
+    total = (
+        abs(bias.get("NIFTY", 0)) +
+        abs(bias.get("MACRO", 0)) +
+        abs(bias.get("CRUDE", 0)) +
+        abs(bias.get("BANKING", 0))
+    )
 
-    if score > 2:
-        direction = "Bullish Bias"
-        gap_up = prob
-        gap_down = 100 - prob
-        plan = "Buy dips above VWAP"
-    elif score < -2:
-        direction = "Bearish Bias"
-        gap_down = prob
-        gap_up = 100 - prob
-        plan = "Watch opening range breakdown"
+    if total >= 10:
+        return "🚨 VOLATILITY EXPLOSION RISK", total
+    elif total >= 7:
+        return "⚡ VOLATILITY SPIKE RISK", total
+    elif total >= 4:
+        return "🔶 Elevated Volatility", total
     else:
-        direction = "Neutral / Range"
-        gap_up = 50
-        gap_down = 50
-        plan = "Wait for breakout confirmation"
-
-    vol_mode = index_volatility_mode(index_name)
-
-    return score, strength, gap_up, gap_down, direction, plan, vol_mode
+        return "🟢 Normal Volatility", total
 
 # ===============================
-# NEXT DAY PROJECTION (UPDATED)
+# GAMMA BLAST DETECTOR (NEW)
 # ===============================
-def next_day_projection():
-    global last_projection_sent
+def gamma_blast_detector():
     now = datetime.now()
+    vol_label, vol_score = volatility_spike_model()
+    nifty_score = abs(bias.get("NIFTY", 0))
 
-    if now.hour == 15 and now.minute >= 15:
-        if last_projection_sent == now.date():
-            return
+    morning_window = (now.hour == 9 and 15 <= now.minute <= 59)
+    afternoon_window = (now.hour == 13) or (now.hour == 14 and now.minute <= 30)
 
-        nifty_score, nifty_strength, nifty_up, nifty_down, nifty_dir, nifty_plan, nifty_vol = index_projection("NIFTY")
-        sensex_score, sensex_strength, sensex_up, sensex_down, sensex_dir, sensex_plan, sensex_vol = index_projection("SENSEX")
-
-        def format_score(score):
-            if score > 0:
-                return f"<font color='green'>+{score}</font>"
-            elif score < 0:
-                return f"<font color='red'>{score}</font>"
-            else:
-                return f"<font color='gray'>{score}</font>"
-
-        msg = (
-            f"📌 <b>NEXT DAY INDEX PROJECTION (3:15 PM)</b>\n\n"
-
-            f"🔵 NIFTY 50\n"
-            f"Score: {format_score(nifty_score)} ({nifty_strength})\n"
-            f"📈 Gap Up Probability: {nifty_up}%\n"
-            f"📉 Gap Down Probability: {nifty_down}%\n"
-            f"Volatility Mode: {nifty_vol}\n"
-            f"Projection: <b>{nifty_dir}</b>\n"
-            f"Plan: {nifty_plan}\n\n"
-
-            f"🟣 SENSEX\n"
-            f"Score: {format_score(sensex_score)} ({sensex_strength})\n"
-            f"📈 Gap Up Probability: {sensex_up}%\n"
-            f"📉 Gap Down Probability: {sensex_down}%\n"
-            f"Volatility Mode: {sensex_vol}\n"
-            f"Projection: <b>{sensex_dir}</b>\n"
-            f"Plan: {sensex_plan}"
-        )
-
-        send_telegram(msg)
-        last_projection_sent = now.date()
-
-# ===============================
-# EIA
-# ===============================
-def check_eia():
-    if not EIA_API_KEY:
-        return
-    try:
-        gas_url = f"https://api.eia.gov/v2/natural-gas/stor/wkly/data/?api_key={EIA_API_KEY}&length=1"
-        crude_url = f"https://api.eia.gov/v2/petroleum/stoc/wstk/data/?api_key={EIA_API_KEY}&length=1"
-
-        gas = requests.get(gas_url).json()["response"]["data"][0]["value"]
-        crude = requests.get(crude_url).json()["response"]["data"][0]["value"]
-
-        send_telegram(f"🛢 <b>EIA Inventory Update</b>\nGas: {gas}\nCrude: {crude}")
-    except:
-        pass
+    if nifty_score >= 3 and vol_score >= 7 and (morning_window or afternoon_window):
+        return True
+    return False
 
 # ===============================
 # RSS
@@ -270,6 +221,7 @@ def check_rss():
 
                 score = classify_sentiment(entry.title)
                 bias[asset] += score
+                save_state()
 
                 impact = "🔥 HIGH IMPACT" if any(w in entry.title.lower() for w in HIGH_IMPACT) else "🟢 Update"
 
@@ -282,6 +234,7 @@ def check_rss():
 
                 send_telegram(msg, buttons=[[{"text": "Open Link", "url": entry.link}]])
                 sent_news.add(entry.link)
+                save_state()
 
         except:
             pass
@@ -295,37 +248,36 @@ def send_bias_summary():
         summary = "📊 <b>MARKET BIAS SUMMARY</b>\n\n"
         for asset, score in bias.items():
             summary += f"{asset}: {score} | {probability_score(score)}%\n"
+
+        vol_label, vol_score = volatility_spike_model()
+        summary += f"\n\nVolatility Model: {vol_label} (Score: {vol_score})"
+
         send_telegram(summary)
         last_bias_time = datetime.now()
-
-# ===============================
-# PREMARKET
-# ===============================
-def send_premarket_summary():
-    global last_premarket_sent
-    now = datetime.now()
-    if now.hour == 8 and now.minute >= 45:
-        if last_premarket_sent != now.date():
-            summary = "🌅 <b>INDIA PRE-MARKET BIAS</b>\n\n"
-            for asset, score in bias.items():
-                summary += f"{asset}: {score} | {probability_score(score)}%\n"
-            send_telegram(summary)
-            last_premarket_sent = now.date()
 
 # ===============================
 # LOOP
 # ===============================
 def bot_loop():
+    global last_gamma_alert_time
     send_telegram("🚀 Institutional Scanner Started")
 
     while True:
         try:
             check_rss()
-            check_eia()
             send_bias_summary()
-            send_premarket_summary()
-            next_day_projection()
+
+            if gamma_blast_detector():
+                if not last_gamma_alert_time or (datetime.now() - last_gamma_alert_time).seconds > 900:
+                    send_telegram(
+                        "💥 <b>GAMMA BLAST SETUP DETECTED</b>\n"
+                        "High directional pressure + volatility spike.\n"
+                        "Prepare for momentum expansion."
+                    )
+                    last_gamma_alert_time = datetime.now()
+
             time.sleep(CHECK_INTERVAL)
+
         except:
             time.sleep(60)
 
@@ -333,6 +285,7 @@ def bot_loop():
 # START
 # ===============================
 if __name__ == "__main__":
+    load_state()
     Thread(target=bot_loop, daemon=True).start()
     port = int(os.getenv("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
